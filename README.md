@@ -59,6 +59,113 @@ state_machine_flow.can_transit_to_state?(order.state, :scheduled)
 state_machine_flow.transition_event(order.state, :scheduled)
 ```
 
+## Samples
+
+See `lib/samples` for complete examples:
+
+- `lib/samples/order_state_machine.rb` shows a larger order flow with many events.
+- `lib/samples/payment_state_machine.rb` shows `Stateless::Transition.guard` usage.
+
+The payment sample has two transitions with the same `event_name`, but each
+transition has a different guard. The guard depends on the `payment` object
+passed into the state machine.
+
+If multiple transitions with the same `event_name` can be applied, the first
+matching transition defined in the transition list is selected:
+
+```ruby
+module Samples
+  class PaymentStateMachine
+    AUTO_APPROVAL_LIMIT_CENTS = 10_000
+
+    attr_reader :engine, :payment
+
+    delegate :can_transit_to_state?, :transition_event, :can_transit_by_event?, :transition_state_by_event, to: :engine
+
+    def initialize(payment)
+      @payment = payment
+      @engine = ::Stateless::Engine.new(transitions)
+    end
+
+    private
+
+    def transitions
+      [
+        new_transition(
+          event_name: :authorize,
+          from: %i[pending],
+          to: :approved,
+          guard: -> { payment.amount_cents <= AUTO_APPROVAL_LIMIT_CENTS }
+        ),
+        new_transition(
+          event_name: :authorize,
+          from: %i[pending],
+          to: :manual_review,
+          guard: -> { payment.amount_cents > AUTO_APPROVAL_LIMIT_CENTS }
+        )
+      ]
+    end
+
+    def new_transition(event_name:, from:, to:, guard:)
+      ::Stateless::Transition.new(event_name:, from:, to:, guard:)
+    end
+  end
+end
+```
+
+For a small payment, the `:authorize` event moves from `:pending` to
+`:approved`:
+
+```ruby
+Payment = Struct.new(:amount_cents, keyword_init: true)
+
+state_machine = Samples::PaymentStateMachine.new(Payment.new(amount_cents: 5_000))
+
+state_machine.can_transit_by_event?(:pending, :authorize)
+# => true
+
+state_machine.transition_state_by_event(:pending, :authorize)
+# => :approved
+
+state_machine.can_transit_to_state?(:pending, :approved)
+# => true
+
+state_machine.can_transit_to_state?(:pending, :manual_review)
+# => false
+```
+
+For a larger payment, the same `:authorize` event moves from `:pending` to
+`:manual_review` because the second guard matches:
+
+```ruby
+state_machine = Samples::PaymentStateMachine.new(Payment.new(amount_cents: 15_000))
+
+state_machine.can_transit_by_event?(:pending, :authorize)
+# => true
+
+state_machine.transition_state_by_event(:pending, :authorize)
+# => :manual_review
+
+state_machine.can_transit_to_state?(:pending, :approved)
+# => false
+
+state_machine.can_transit_to_state?(:pending, :manual_review)
+# => true
+```
+
+Guards do not override the source state. If the source state does not match,
+the transition is not applied:
+
+```ruby
+state_machine = Samples::PaymentStateMachine.new(Payment.new(amount_cents: 5_000))
+
+state_machine.can_transit_by_event?(:approved, :authorize)
+# => false
+
+state_machine.transition_state_by_event(:approved, :authorize)
+# => nil
+```
+
 ## Why Stateless?
 
 `Stateless` is useful when you want transition rules without model-owned state
@@ -155,13 +262,6 @@ Returns the event name that moves from `from` to `to`.
 ```ruby
 event_name = state_machine_flow.transition_event(order.state, :scheduled)
 ```
-
-## Sample Order State Machine
-
-See `lib/samples/order_state_machine.rb` for a larger example of an order flow.
-It defines transitions such as `prepare`, `provision`, `schedule`, `cancel`,
-`reset`, and `reopen`, then delegates the public query methods to
-`Stateless::Engine`.
 
 ## Development
 
